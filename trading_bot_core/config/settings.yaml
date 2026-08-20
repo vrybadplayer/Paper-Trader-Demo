@@ -1,0 +1,38 @@
+# Model Routing Definitions
+model_routing:
+  worker_engine:
+    primary: "qwen2.5-coder:7b"
+    cloud_fallback: "hermes-3-llama-3.1-8b"
+    temperature: 0.0
+    mode: "System 1: Procedural Execution (Fast Tool Calling & JSON Parsing)"
+  critic_engine:
+    primary: "deepseek-r1:14b"
+    cloud_fallback: "deepseek-r1:32b"
+    temperature: 0.1
+    mode: "System 2: Deep Chain-of-Thought (Risk Auditing & Market Psychology)"
+
+# System Constants
+system:
+  cash_reserve: 50000.0  # Minimum cash reserve invariant
+  max_position_size: 0.1  # Maximum 10% of equity per position
+  risk_free_rate: 0.02   # Annual risk-free rate for Sharpe calculation
+
+# Broker Configuration (Paper Trading)
+broker:
+  sandbox_enabled: true
+  live_enabled: false
+  sandbox_initial_balance: 50000.0
+  commission_per_trade: 0.001  # 0.1%
+  slippage_model: "fixed"  # or "random", "volume_weighted"
+
+# ChromaDB Configuration
+chromadb:
+  persist_directory: "./database/data/chroma_db"
+  collection_name: "trading_memory"
+  embedding_function: "default"  # or specify a model
+
+# Logging
+logging:
+  level: "INFO"
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  file: "./database/logs/trading_bot.log"
