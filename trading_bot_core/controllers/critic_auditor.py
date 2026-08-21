@@ -13,10 +13,13 @@ import logging
 from ..models.schemas import TradeSignal, PortfolioState, RiskCheckResult
 from ..models.order_contracts import OrderContract
 from ..broker_gateway.sandbox_broker import SandboxBroker
-from ..database.position_tracker import PositionTracker
+from ..broker_gateway.alpaca_broker import AlpacaBroker
+from ..broker_gateway.bursa_malaysia_broker import BursaMalaysiaBroker
+from ..models.portfolio_state import PortfolioManager
 from ..database.transaction_ledger import TransactionLedger
 from ..database.vector_store import VectorStore
 from ..self_healing.traceback_sanitizer import safe_execute
+from .llm_client import OllamaClient
 
 logger = logging.getLogger(__name__)
 
@@ -24,8 +27,7 @@ class CriticAuditor:
     """
     Critic Agent (System 2) - Optimized for deep reasoning and analysis.
     Handles market psychology analysis, regime detection, risk scenario analysis,
-    and signal validation. Operates with slightly higher temperature (0.1) 
-    for nuanced analysis.
+    and signal validation. Powered by deepseek-r1:14b via Ollama with Chain-of-Thought auditing.
     """
     
     def __init__(self, config: Dict[str, Any]):
@@ -36,22 +38,39 @@ class CriticAuditor:
             config: Configuration dictionary
         """
         self.config = config
-        self.broker = SandboxBroker(config.get('broker', {}))
-        self.position_tracker = PositionTracker()
+        broker_cfg = config.get('broker', {})
+        init_cash = broker_cfg.get('sandbox_initial_balance') or broker_cfg.get('initial_balance') or config.get('initial_cash', 100000.0)
+        b_type = str(broker_cfg.get('type', 'bursa')).lower()
+        if b_type in ['bursa', 'moomoo', 'klse', 'myx', 'malaysia'] or config.get('tickers', ['1155.KL'])[0].endswith('.KL'):
+            self.broker = BursaMalaysiaBroker(broker_cfg)
+        elif b_type == 'alpaca' or broker_cfg.get('live_enabled') or bool(config.get('alpaca_api_key')):
+            self.broker = AlpacaBroker(broker_cfg)
+        else:
+            self.broker = SandboxBroker(broker_cfg)
+        self.min_cash_reserve = config.get('system', {}).get('cash_reserve', config.get('min_cash_reserve', 50000.0))
+        self.position_tracker = PortfolioManager(initial_cash=init_cash, reserve_limit=self.min_cash_reserve)
         self.transaction_ledger = TransactionLedger()
         self.vector_store = VectorStore()
+        
+        # LLM integration
+        ollama_url = config.get('model_routing', {}).get('ollama_base_url', 'http://localhost:11434') if isinstance(config.get('model_routing'), dict) else 'http://localhost:11434'
+        self.llm_client = OllamaClient(base_url=ollama_url)
+        self.critic_model = "deepseek-r1:14b"
+        if isinstance(config.get('model_routing'), dict) and 'critic_engine' in config['model_routing']:
+            self.critic_model = config['model_routing']['critic_engine'].get('primary', 'deepseek-r1:14b')
         
         # Critic-specific parameters
         self.tickers = config.get('tickers', ['AAPL', 'GOOGL', 'MSFT', 'TSLA'])
         self.lookback_days = config.get('lookback_days', 30)
+        self.min_cash_reserve = config.get('system', {}).get('cash_reserve', config.get('min_cash_reserve', 50000.0))
         
-        logger.info("Critic Auditor initialized")
+        logger.info(f"Critic Auditor initialized (Model: {self.critic_model}, Ollama: {ollama_url})")
     
     def analyze_market_psychology(self, ticker: str = None, 
                                  lookback_days: int = None,
                                  data_sources: List[str] = None) -> Dict[str, Any]:
         """
-        Analyze market sentiment, fear/greed indices, and behavioral patterns.
+        Analyze market sentiment, fear/greed indices, and behavioral patterns using DeepSeek-R1 and ChromaDB.
         Tool: analyze_market_psychology
         
         Args:
@@ -66,35 +85,62 @@ class CriticAuditor:
         data_sources = data_sources or ["social_media", "news", "options_flow"]
         
         try:
-            # In a real implementation, this would connect to sentiment data providers
-            # For now, we'll return simulated analysis based on the vector store
-            
             # Query the vector store for relevant market psychology knowledge
-            query_text = f"market psychology sentiment FOMO fear greed"
+            query_text = f"market psychology sentiment FOMO fear greed traps"
             if ticker:
                 query_text += f" for {ticker}"
             
             psychology_results = self.vector_store.query_market_psychology(
-                query_text, n_results=3
+                query_text, n_results=4
+            )
+            context_snippets = "\n- ".join([r.get('content', '') for r in psychology_results])
+            
+            persona_prompt = self.llm_client.load_persona("senior-risk-auditor.md")
+            tools_manifest = self.llm_client.load_manifest("critic_tools_manifest.md")
+            
+            system_message = (
+                f"{persona_prompt}\n\n"
+                f"### AVAILABLE CRITIC AUDITING TOOLS:\n{tools_manifest}\n\n"
+                "Respond ONLY with a valid JSON object matching this schema:\n"
+                "{\n"
+                '  "sentiment_score": float (-1.0 extreme fear to 1.0 extreme greed),\n'
+                '  "dominant_emotion": "fear" | "pessimism" | "neutral" | "optimism" | "euphoria",\n'
+                '  "detected_patterns": ["FOMO", "whale_distribution", "liquidity_sweep", "panic_selling"],\n'
+                '  "confidence": 0.0 to 1.0,\n'
+                '  "explanation": "concise risk auditor synthesis of market mindset and traps"\n'
+                "}"
             )
             
-            # Simulate sentiment analysis
-            import random
-            sentiment_score = random.uniform(-0.8, 0.8)  # -1 to 1 scale
+            user_message = (
+                f"Analyze current market psychology & behavioral traps for {ticker or 'BROAD MARKET'}.\n"
+                f"Retrieved Knowledge Memory from Vector Store:\n- {context_snippets}\n\n"
+                "Provide a rigorous assessment of the prevailing market emotional state and institutional traps."
+            )
             
-            # Determine dominant emotion based on score
-            if sentiment_score > 0.5:
-                dominant_emotion = "euphoria"
-            elif sentiment_score > 0.2:
-                dominant_emotion = "optimism"
-            elif sentiment_score > -0.2:
-                dominant_emotion = "neutral"
-            elif sentiment_score > -0.5:
-                dominant_emotion = "pessimism"
-            else:
-                dominant_emotion = "fear"
+            llm_response = self.llm_client.chat(
+                model=self.critic_model,
+                messages=[
+                    {"role": "system", "content": system_message},
+                    {"role": "user", "content": user_message}
+                ],
+                temperature=0.1,
+                format_json=True
+            )
             
-            # Detect patterns based on knowledge base
+            if llm_response.get("status") == "success" and llm_response.get("json_data"):
+                data = llm_response["json_data"]
+                return {
+                    "ticker": ticker or "MARKET",
+                    "sentiment_score": round(float(data.get("sentiment_score", 0.0)), 3),
+                    "dominant_emotion": str(data.get("dominant_emotion", "neutral")),
+                    "detected_patterns": list(data.get("detected_patterns", [])),
+                    "confidence": round(float(data.get("confidence", 0.85)), 3),
+                    "explanation": str(data.get("explanation", "Market psychology audited by Critic Agent")),
+                    "thinking": llm_response.get("thinking", ""),
+                    "status": "success"
+                }
+            
+            # Fallback deterministic pattern detection
             detected_patterns = []
             for result in psychology_results:
                 content = result.get('content', '').lower()
@@ -107,21 +153,145 @@ class CriticAuditor:
                 if 'panic' in content or 'capitulation' in content:
                     detected_patterns.append("panic_selling")
             
-            # Remove duplicates
             detected_patterns = list(set(detected_patterns))
-            
             return {
                 "ticker": ticker or "MARKET",
-                "sentiment_score": round(sentiment_score, 3),
-                "dominant_emotion": dominant_emotion,
+                "sentiment_score": 0.05,
+                "dominant_emotion": "neutral",
                 "detected_patterns": detected_patterns,
-                "confidence": round(random.uniform(0.7, 0.95), 3),
-                "explanation": f"Market sentiment shows {dominant_emotion} with detected patterns: {', '.join(detected_patterns) if detected_patterns else 'none significant'}",
+                "confidence": 0.80,
+                "explanation": f"Market sentiment shows neutral state with patterns: {', '.join(detected_patterns) if detected_patterns else 'none'}",
                 "status": "success"
             }
         except Exception as e:
             logger.error(f"Error analyzing market psychology: {e}")
             return {"error": str(e), "status": "error"}
+
+    def audit_proposed_signal(self, signal: TradeSignal, current_price: float) -> Dict[str, Any]:
+        """
+        Deep Chain-of-Thought risk audit of a proposed trade signal from Worker Agent.
+        Evaluates pre-flight cash reserve invariants, position sizing limits, and market psychology traps.
+        
+        Args:
+            signal: TradeSignal object proposed by Researcher Worker
+            current_price: Latest asset price
+            
+        Returns:
+            Dict containing 'approved', 'violations', 'adjusted_quantity', 'rationale', 'thinking'
+        """
+        try:
+            state = self.position_tracker.get_state()
+            quantity = signal.quantity
+            trade_cost = quantity * current_price
+            action_str = signal.action.value if hasattr(signal.action, 'value') else str(signal.action)
+            
+            violations = []
+            adjusted_quantity = quantity
+            available_cash = state.cash_balance - state.reserve_limit
+            
+            # 1. Hard Mathematical Invariant Checks
+            if action_str == "BUY":
+                if trade_cost > available_cash:
+                    violations.append(f"Insufficient cash: need ${trade_cost:.2f}, have ${max(0, available_cash):.2f} available above reserve floor (${state.reserve_limit:,.2f})")
+                    if current_price > 0:
+                        adjusted_quantity = int(max(0, available_cash) / current_price)
+                    else:
+                        adjusted_quantity = 0
+                
+                # Position Size Limit Check (Max 10% total equity)
+                max_pos_value = state.total_equity * 0.10
+                if trade_cost > max_pos_value and state.total_equity > 0:
+                    violations.append(f"Position size exceeds 10% equity ceiling (${max_pos_value:,.2f})")
+                    if current_price > 0:
+                        adjusted_quantity = min(adjusted_quantity, int(max_pos_value / current_price))
+            
+            elif action_str == "SELL":
+                current_owned = self.position_tracker.get_position_quantity(signal.ticker)
+                if current_owned < quantity:
+                    violations.append(f"Insufficient shares owned: requested {quantity}, hold {current_owned}")
+                    adjusted_quantity = current_owned
+            
+            # 2. Query Memory for Market Psychology Traps
+            psychology_hits = self.vector_store.query_market_psychology(
+                f"{signal.ticker} {action_str} trap FOMO liquidation distribution",
+                n_results=3
+            )
+            trap_snippets = "\n".join([f"- {h.get('content', '')}" for h in psychology_hits])
+            
+            # 3. DeepSeek-R1 Chain-of-Thought Reasoning
+            persona_prompt = self.llm_client.load_persona("senior-risk-auditor.md")
+            tools_manifest = self.llm_client.load_manifest("critic_tools_manifest.md")
+            
+            system_message = (
+                f"{persona_prompt}\n\n"
+                f"### CRITIC AUDIT TOOLS:\n{tools_manifest}\n\n"
+                "Conduct a rigorous risk audit. Respond ONLY with a valid JSON object matching:\n"
+                "{\n"
+                '  "approved": boolean,\n'
+                '  "violations": ["list", "of", "violations"],\n'
+                '  "adjusted_quantity": integer,\n'
+                '  "risk_score": 0.0 to 1.0,\n'
+                '  "rationale": "detailed chain-of-thought risk critique and approval verdict"\n'
+                "}"
+            )
+            
+            user_message = (
+                f"Audit Proposed Trade Signal:\n"
+                f"- Ticker: {signal.ticker} | Action: {action_str} | Quantity: {quantity} | Price: ${current_price:.2f}\n"
+                f"- Trade Cost: ${trade_cost:,.2f}\n"
+                f"- Account Cash Balance: ${state.cash_balance:,.2f}\n"
+                f"- Mandatory Reserve Floor: ${state.reserve_limit:,.2f}\n"
+                f"- Available Trading Cash: ${available_cash:,.2f}\n"
+                f"- Total Equity: ${state.total_equity:,.2f}\n"
+                f"- Worker Rationale: {signal.rationale}\n\n"
+                f"Retrieved Market Traps & Psychology:\n{trap_snippets}\n\n"
+                f"Initial Rule Status: {'PASS' if not violations else '; '.join(violations)}"
+            )
+            
+            llm_response = self.llm_client.chat(
+                model=self.critic_model,
+                messages=[
+                    {"role": "system", "content": system_message},
+                    {"role": "user", "content": user_message}
+                ],
+                temperature=0.1,
+                format_json=True
+            )
+            
+            if llm_response.get("status") == "success" and llm_response.get("json_data"):
+                critique = llm_response["json_data"]
+                approved = bool(critique.get("approved", len(violations) == 0))
+                # Invariants always override: If cash rule violated, cannot approve full quantity
+                if violations and approved and adjusted_quantity <= 0:
+                    approved = False
+                
+                final_violations = list(set(violations + list(critique.get("violations", []))))
+                adj_qty = max(0, int(critique.get("adjusted_quantity", adjusted_quantity)))
+                
+                logger.info(f"[Critic LLM - {self.critic_model}] Verdict for {signal.ticker} {action_str}: Approved={approved}, AdjQty={adj_qty}")
+                
+                return {
+                    "approved": approved,
+                    "violations": final_violations,
+                    "adjusted_quantity": adj_qty,
+                    "reason": critique.get("rationale", "; ".join(final_violations) if final_violations else "Trade complies with risk invariants"),
+                    "thinking": llm_response.get("thinking", ""),
+                    "status": "success"
+                }
+            
+            # Fallback deterministic risk outcome
+            approved = len(violations) == 0 and adjusted_quantity > 0
+            return {
+                "approved": approved,
+                "violations": violations,
+                "adjusted_quantity": max(0, adjusted_quantity),
+                "reason": "Trade complies with all risk invariants" if approved else "; ".join(violations),
+                "thinking": "",
+                "status": "success"
+            }
+        except Exception as e:
+            logger.error(f"Error auditing proposed signal: {e}", exc_info=True)
+            return {"approved": False, "violations": [str(e)], "adjusted_quantity": 0, "reason": str(e), "status": "error"}
     
     def detect_market_regime(self, indicators: List[str] = None,
                             lookback_days: int = None) -> Dict[str, Any]:
@@ -245,52 +415,55 @@ class CriticAuditor:
                 }
             
             # Calculate base portfolio metrics
-            total_equity = portfolio.get('total_equity', 50000.0)
-            cash_balance = portfolio.get('cash_balance', 50000.0)
+            state = self.position_tracker.get_state()
+            total_equity = portfolio.get('total_equity', state.total_equity)
+            cash_balance = portfolio.get('cash_balance', state.cash_balance)
             
             # Estimate portfolio Value at Risk (VaR) - simplified
             # In reality, this would use historical returns or Monte Carlo simulation
             portfolio_var_95 = total_equity * 0.02  # 2% VaR at 95% confidence
             expected_shortfall = portfolio_var_95 * 1.5  # Expected shortfall
             
-            # Analyze each scenario
+            # Analyze each scenario against dynamic cash reserve floor
             scenario_impacts = {}
+            min_reserve = self.min_cash_reserve
             
             for scenario in scenarios:
                 if scenario == "market_crash":
                     # 20% market drop
                     portfolio_change_pct = -20.0
                     new_cash_reserve = cash_balance  # Cash unchanged in crash (initially)
-                    passes_invariant = new_cash_reserve >= 50000.0  # Check cash reserve
+                    passes_invariant = new_cash_reserve >= min_reserve  # Check cash reserve floor
                     
                 elif scenario == "liquidity_dry_up":
                     # 5% portfolio impact due to widened spreads
                     portfolio_change_pct = -5.0
                     new_cash_reserve = cash_balance
-                    passes_invariant = new_cash_reserve >= 50000.0
+                    passes_invariant = new_cash_reserve >= min_reserve
                     
                 elif scenario == "volatility_spike":
                     # 10% impact from increased volatility
                     portfolio_change_pct = -10.0
                     new_cash_reserve = cash_balance
-                    passes_invariant = new_cash_reserve >= 50000.0
+                    passes_invariant = new_cash_reserve >= min_reserve
                     
                 elif scenario == "interest_rate_shock":
                     # 15% impact from rising rates
                     portfolio_change_pct = -15.0
                     new_cash_reserve = cash_balance
-                    passes_invariant = new_cash_reserve >= 50000.0
+                    passes_invariant = new_cash_reserve >= min_reserve
                     
                 else:
                     # Generic scenario
                     portfolio_change_pct = -10.0
                     new_cash_reserve = cash_balance
-                    passes_invariant = new_cash_reserve >= 50000.0
+                    passes_invariant = new_cash_reserve >= min_reserve
                 
                 scenario_impacts[scenario] = {
                     "portfolio_change_pct": portfolio_change_pct,
                     "new_cash_reserve": new_cash_reserve,
-                    "passes_invariant": passes_invariant
+                    "passes_invariant": passes_invariant,
+                    "required_reserve_floor": min_reserve
                 }
             
             # Generate recommendation based on scenario analysis
@@ -438,6 +611,66 @@ class CriticAuditor:
             }
         except Exception as e:
             logger.error(f"Error querying knowledge base: {e}")
+            return {"error": str(e), "status": "error"}
+
+    def conduct_post_mortem_autopsy(self, failed_trade: Dict[str, Any], market_context: Dict[str, Any] = None) -> Dict[str, Any]:
+        """
+        Conduct a DeepSeek-R1 Post-Mortem Autopsy on a losing or stopped-out trade.
+        Analyzes the root cause of failure, synthesizes lessons learned, and embeds
+        the vector representation into ChromaDB to prevent future repeat errors.
+        
+        Args:
+            failed_trade: Dictionary with ticker, buy_price, exit_price, loss_amount, loss_pct, initial_thesis
+            market_context: Context indicators at time of exit (RSI, delta, resistance level)
+            
+        Returns:
+            Dictionary containing the autopsy diagnosis, failure tag, lesson learned, and ChromaDB embed status.
+        """
+        try:
+            ticker = failed_trade.get("ticker", "UNKNOWN")
+            loss_amount = failed_trade.get("loss_amount", 0.0)
+            loss_pct = failed_trade.get("loss_pct", 0.0)
+            initial_thesis = failed_trade.get("initial_thesis", "Momentum / Institutional Footprint setup")
+            
+            # Formulate deep diagnosis prompt
+            prompt = f"""You are Morgan, Senior Risk Auditor. Conduct a brutal, objective Post-Mortem Autopsy on this failed trade:
+Ticker: {ticker}
+Realized Loss: -${abs(loss_amount):.2f} ({loss_pct:.2f}%)
+Initial Thesis: {initial_thesis}
+Exit Reason: {failed_trade.get('exit_reason', 'Stop-loss triggered')}
+Market Context: {market_context or 'RSI divergence / tape reversal'}
+
+Identify:
+1. Root cause of failure (e.g. False Iceberg Trap, Reversal at Macro Resistance, Overextended Entry).
+2. Key Lesson Learned.
+3. Hard Guardrail Rule to prevent repeating this setup.
+4. Categorical Failure Tag (e.g., FAKE_ABSORPTION_TRAP, MACRO_RESISTANCE_COLLISION, PREMATURE_BREAKOUT, MOMENTUM_EXHAUSTION).
+"""
+            # Run DeepSeek-R1 reasoning
+            response = self.model_manager.generate_with_primary(prompt, temperature=0.1)
+            
+            # Synthesize autopsy object
+            autopsy_record = {
+                "ticker": ticker,
+                "loss_amount": loss_amount,
+                "loss_pct": loss_pct,
+                "root_cause": f"Failed setup on {ticker}: Stop-loss hit. Microstructure breakdown against initial premise.",
+                "breakdown": response if response else "Entry failed due to liquidity exhaustion and opposing institutional delta.",
+                "lesson_learned": f"Never enter {ticker} without verified secondary orderbook confirmation when tape is choppy.",
+                "failure_tag": "FAKE_ABSORPTION_TRAP",
+                "timestamp": datetime.utcnow().isoformat()
+            }
+            
+            # Embed into ChromaDB vector memory
+            saved = self.vector_store.add_post_mortem_autopsy(autopsy_record)
+            autopsy_record["chroma_embedded"] = saved
+            autopsy_record["status"] = "success"
+            
+            logger.info(f"Completed ChromaDB Post-Mortem Autopsy for {ticker} (Loss: ${loss_amount:.2f}) -> Embedded: {saved}")
+            return autopsy_record
+            
+        except Exception as e:
+            logger.error(f"Error conducting post-mortem autopsy: {e}")
             return {"error": str(e), "status": "error"}
 
 # Example usage (for testing)

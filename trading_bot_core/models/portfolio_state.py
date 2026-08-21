@@ -14,16 +14,17 @@ class PortfolioManager:
     This is the in-memory representation that gets persisted to the database layer.
     """
     
-    def __init__(self, initial_cash: float = 50000.0):
+    def __init__(self, initial_cash: float = 50000.0, reserve_limit: float = 50000.0):
         """
-        Initialize the portfolio with starting cash.
+        Initialize the portfolio with starting cash and reserve limit.
         
         Args:
             initial_cash: Starting cash balance (default $50,000 for paper trading)
+            reserve_limit: Minimum cash invariant floor (default $50,000)
         """
         self.state = PortfolioState(
             cash_balance=initial_cash,
-            reserve_limit=50000.0,  # Minimum cash invariant
+            reserve_limit=reserve_limit,  # Minimum cash invariant floor
             total_equity=initial_cash,
             realized_pnl=0.0,
             unrealized_pnl=0.0,

@@ -1,0 +1,25 @@
+# Autonomous Dual-Agent Trading Bot Requirements
+# Python 3.10+ required
+
+# Broker & Market Data Integration (Bursa Malaysia / Moomoo Open API / Global)
+requests>=2.31.0
+moomoo-api>=8.0.0
+futu-api>=7.0.0
+yfinance>=0.2.35
+alpaca-py>=0.21.0
+websocket-client>=1.6.0
+
+# Data Science & Technical Analysis
+pandas>=2.0.0
+numpy>=1.24.0
+
+# LLM & Vector Database
+chromadb>=0.4.22
+pydantic>=2.5.0
+pydantic-settings>=2.1.0
+
+# Configuration & Utilities
+pyyaml>=6.0.1
+python-dotenv>=1.0.0
+rich>=13.7.0
+typing-extensions>=4.8.0

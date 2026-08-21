@@ -131,6 +131,62 @@ class VectorStore:
             self.logger.error(f"Error adding text to vector store: {e}")
             return False
     
+    def add_post_mortem_autopsy(self, autopsy_data: Dict[str, Any]) -> bool:
+        """
+        Add a post-mortem autopsy of a losing trade into ChromaDB vector memory.
+        
+        Args:
+            autopsy_data: Dictionary containing failure diagnosis, ticker, loss amount,
+                          root cause, lesson learned, and pattern tags.
+            
+        Returns:
+            bool: True if embedded and saved successfully.
+        """
+        if not self.is_available():
+            return False
+            
+        try:
+            text = (
+                f"POST-MORTEM AUTOPSY [{autopsy_data.get('ticker', 'UNKNOWN')}]: "
+                f"Trade resulted in ${abs(autopsy_data.get('loss_amount', 0)):.2f} loss ({autopsy_data.get('loss_pct', 0):.1f}%). "
+                f"Root Cause: {autopsy_data.get('root_cause', 'Unknown')}. "
+                f"Breakdown: {autopsy_data.get('breakdown', '')}. "
+                f"Lesson Learned: {autopsy_data.get('lesson_learned', '')}. "
+                f"Failure Pattern Tag: {autopsy_data.get('failure_tag', 'GENERAL_FAILURE')}."
+            )
+            
+            metadata = {
+                "type": "post_mortem_loss",
+                "category": "loss_autopsy",
+                "ticker": autopsy_data.get("ticker", ""),
+                "loss_amount": float(autopsy_data.get("loss_amount", 0)),
+                "loss_pct": float(autopsy_data.get("loss_pct", 0)),
+                "failure_tag": autopsy_data.get("failure_tag", "GENERAL_FAILURE"),
+                "timestamp": autopsy_data.get("timestamp", datetime.utcnow().isoformat())
+            }
+            
+            return self.add_text(text, metadata)
+        except Exception as e:
+            self.logger.error(f"Error saving post-mortem autopsy to ChromaDB: {e}")
+            return False
+            
+    def query_loss_reflections(self, query_text: str, n_results: int = 3, ticker: str = None) -> List[Dict[str, Any]]:
+        """
+        Query specifically for post-mortem loss reflections and failure patterns.
+        
+        Args:
+            query_text: The search query text (e.g. "false breakout resistance")
+            n_results: Max results
+            ticker: Optional ticker filter
+            
+        Returns:
+            List of matching past post-mortems with lessons learned.
+        """
+        filter_dict = {"category": "loss_autopsy"}
+        if ticker:
+            filter_dict = {"$and": [{"category": "loss_autopsy"}, {"ticker": ticker}]}
+        return self.query_knowledge(query_text, n_results, filter_dict)
+
     def add_trade_memory(self, trade_data: Dict[str, Any]) -> bool:
         """
         Add a trade execution to the vector store as memory for future reference.

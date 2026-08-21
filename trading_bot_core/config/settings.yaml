@@ -1,35 +1,54 @@
 # Model Routing Definitions
 model_routing:
+  ollama_base_url: "http://localhost:11434"
+  request_timeout: 60
   worker_engine:
-    primary: "qwen2.5-coder:7b"
-    cloud_fallback: "hermes-3-llama-3.1-8b"
-    temperature: 0.0
-    mode: "System 1: Procedural Execution (Fast Tool Calling & JSON Parsing)"
+    primary: "deepseek-r1:14b"
+    cloud_fallback: "deepseek-r1:7b"
+    temperature: 0.1
+    mode: "System 1: Deep Quantitative Researcher (DeepSeek-R1 CoT Alpha Setup)"
   critic_engine:
     primary: "deepseek-r1:14b"
     cloud_fallback: "deepseek-r1:32b"
     temperature: 0.1
     mode: "System 2: Deep Chain-of-Thought (Risk Auditing & Market Psychology)"
 
-# System Constants
-system:
-  cash_reserve: 50000.0  # Minimum cash reserve invariant
-  max_position_size: 0.1  # Maximum 10% of equity per position
-  risk_free_rate: 0.02   # Annual risk-free rate for Sharpe calculation
+# Malaysian Stock Universe (Bursa Malaysia / KLSE)
+tickers:
+  - "5238.KL"  # Capital A Bhd (AirAsia Group / AAGB)
+  - "0138.KL"  # MY E.G. Services Bhd (ZETRIX)
+  - "0459.KL"  # Supreme Consolidated Bhd (SUM)
+  - "4677.KL"  # YTL Corporation Bhd (YTL)
+  - "1155.KL"  # Malayan Banking Bhd (Maybank)
+  - "1023.KL"  # CIMB Group Holdings Bhd
 
-# Broker Configuration (Paper Trading)
+# System Constants (in Malaysian Ringgit MYR)
+system:
+  cash_reserve: 30000.0   # RM 30,000 Minimum cash reserve invariant
+  max_position_size: 0.15 # Maximum 15% of equity per position
+  risk_free_rate: 0.03    # 3.0% Malaysian OPR benchmark rate
+
+# Broker Configuration (Bursa Malaysia / Moomoo Open API / IBKR MYX)
 broker:
+  type: "moomoo"                       # "moomoo" (FutuOpenD for Bursa Malaysia) or "ibkr"
+  provider: "moomoo"                   # Moomoo Malaysia (FutuOpenD)
+  currency: "MYR"
+  host: "127.0.0.1"                    # Local FutuOpenD Gateway Host
+  port: 11111                          # FutuOpenD Port (11111) or IBKR (7497)
   sandbox_enabled: true
-  live_enabled: false
-  sandbox_initial_balance: 50000.0
-  commission_per_trade: 0.001  # 0.1%
-  slippage_model: "fixed"  # or "random", "volume_weighted"
+  live_enabled: false                  # Set to true for live simulated paper order execution
+  paper_trading: true
+  sandbox_initial_balance: 100000.0    # RM 100,000 initial paper capital
+  shark_block_threshold_myr: 200000.0  # Flag institutional block trades >= RM 200,000
+  shark_block_min_lots: 500            # Flag orders >= 500 lots (50,000 shares)
+  commission_per_trade: 0.0015         # 0.15% brokerage on Bursa Malaysia
+  slippage_model: "fixed"
 
 # ChromaDB Configuration
 chromadb:
   persist_directory: "./database/data/chroma_db"
   collection_name: "trading_memory"
-  embedding_function: "default"  # or specify a model
+  embedding_function: "default"
 
 # Logging
 logging:

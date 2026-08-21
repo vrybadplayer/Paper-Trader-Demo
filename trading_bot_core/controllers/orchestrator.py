@@ -14,6 +14,8 @@ import logging
 from ..models.schemas import PortfolioState, TradeSignal, RiskCheckResult
 from ..models.order_contracts import OrderContract, OrderAction, OrderType, OrderStatus
 from ..broker_gateway.sandbox_broker import SandboxBroker
+from ..broker_gateway.alpaca_broker import AlpacaBroker
+from ..broker_gateway.bursa_malaysia_broker import BursaMalaysiaBroker
 from ..database.position_tracker import PositionTracker
 from ..database.transaction_ledger import TransactionLedger
 from ..database.vector_store import VectorStore
@@ -21,6 +23,8 @@ from ..self_healing.process_guard import ProcessGuard
 from ..self_healing.traceback_sanitizer import safe_execute, setup_traceback_excepthook
 from ..views.rich_dashboard import RichDashboard
 from ..models.portfolio_state import PortfolioManager
+from .generator_worker import GeneratorWorker
+from .critic_auditor import CriticAuditor
 
 logger = logging.getLogger(__name__)
 
@@ -53,25 +57,35 @@ class Orchestrator:
         self.state_lock = threading.RLock()
         
         # Initialize components
+        initial_cash = config.get('initial_cash') or config.get('broker', {}).get('sandbox_initial_balance') or config.get('broker', {}).get('initial_balance', 50000.0)
+        cash_reserve = config.get('system', {}).get('cash_reserve', config.get('min_cash_reserve', 50000.0))
         self.portfolio_manager = PortfolioManager(
-            initial_cash=config.get('initial_cash', 50000.0)
+            initial_cash=initial_cash,
+            reserve_limit=cash_reserve
         )
-        self.broker = SandboxBroker(config.get('broker', {}))
+        broker_cfg = config.get('broker', {})
+        b_type = str(broker_cfg.get('type', 'bursa')).lower()
+        if b_type in ['bursa', 'moomoo', 'klse', 'myx', 'malaysia'] or config.get('tickers', ['1155.KL'])[0].endswith('.KL'):
+            self.broker = BursaMalaysiaBroker(broker_cfg)
+        elif b_type == 'alpaca' or broker_cfg.get('live_enabled') or bool(config.get('alpaca_api_key')):
+            self.broker = AlpacaBroker(broker_cfg)
+        else:
+            self.broker = SandboxBroker(broker_cfg)
         self.position_tracker = PositionTracker()
         self.transaction_ledger = TransactionLedger()
         self.vector_store = VectorStore()
         self.process_guard = ProcessGuard()
         self.dashboard = RichDashboard(self.portfolio_manager)
         
-        # Worker and Critic agents (will be implemented in separate files)
-        self.worker_agent = None  # Will be set to GeneratorWorker instance
-        self.critic_agent = None  # Will be set to CriticAuditor instance
+        # Worker and Critic agents (System 1 and System 2)
+        self.worker_agent = GeneratorWorker(config)
+        self.critic_agent = CriticAuditor(config)
         
         # Trading parameters
         self.tickers = config.get('tickers', ['AAPL', 'GOOGL', 'MSFT', 'TSLA'])
         self.timeframe = config.get('timeframe', '1D')
-        self.max_position_size = config.get('max_position_size', 0.1)  # 10% of equity
-        self.min_cash_reserve = config.get('min_cash_reserve', 50000.0)
+        self.max_position_size = config.get('system', {}).get('max_position_size', config.get('max_position_size', 0.1))
+        self.min_cash_reserve = config.get('system', {}).get('cash_reserve', config.get('min_cash_reserve', 50000.0))
         
         # Control flags
         self.is_running = False
@@ -204,28 +218,33 @@ class Orchestrator:
                 self.state = OrchestratorState.GENERATING_SIGNAL
     
     def _state_generating_signal(self):
-        """GENERATING_SIGNAL state: Worker agent generates trade signals."""
-        logger.debug("Generating trade signal")
+        """GENERATING_SIGNAL state: Worker agent generates trade signals via researcher LLM / quantitative models."""
+        logger.debug("Generating trade signals across watchlists")
         
-        # For now, we'll generate a simple signal based on moving average crossover
-        # In a real implementation, this would involve the Worker Agent (LLM)
-        signal = self._generate_simple_signal()
+        signal = None
+        for ticker in self.tickers:
+            try:
+                sig = self.worker_agent.generate_signal(ticker)
+                if sig is not None:
+                    signal = sig
+                    logger.info(f"Worker generated signal: {sig.action.value} {sig.quantity} {sig.ticker} (Source: {sig.source})")
+                    break
+            except Exception as e:
+                logger.error(f"Error querying worker agent for {ticker}: {e}")
         
         if signal:
-            # Store the signal for the next state
             self._pending_signal = signal
             with self.state_lock:
                 if self.is_running:
                     self.state = OrchestratorState.VALIDATING_SIGNAL
         else:
-            # No signal generated, go back to idle
             with self.state_lock:
                 if self.is_running:
                     self.state = OrchestratorState.IDLE
     
     def _state_validating_signal(self):
-        """VALIDATING_SIGNAL state: Critic agent validates the signal."""
-        logger.debug("Validating signal")
+        """VALIDATING_SIGNAL state: Critic agent audits the signal via DeepSeek-R1 CoT risk engine."""
+        logger.debug("Validating signal with Critic Auditor")
         
         if not hasattr(self, '_pending_signal'):
             logger.warning("No pending signal to validate")
@@ -239,7 +258,7 @@ class Orchestrator:
         # Validate the signal using risk checks and critic analysis
         validation_result = self._validate_signal(signal)
         
-        if validation_result.get('approved', False):
+        if validation_result.get('approved', False) and validation_result.get('adjusted_quantity', 0) > 0:
             # Signal approved, proceed to execution
             self._pending_order = self._signal_to_order(signal, validation_result)
             with self.state_lock:
@@ -247,7 +266,10 @@ class Orchestrator:
                     self.state = OrchestratorState.EXECUTING_TRADE
         else:
             # Signal rejected, log and go back to idle
-            logger.info(f"Signal rejected: {validation_result.get('reason', 'Unknown reason')}")
+            reason = validation_result.get('reason', 'Rejected by risk engine')
+            logger.info(f"Signal for {signal.ticker} rejected by Critic: {reason}")
+            if hasattr(self, '_pending_signal'):
+                delattr(self, '_pending_signal')
             with self.state_lock:
                 if self.is_running:
                     self.state = OrchestratorState.IDLE
@@ -357,8 +379,7 @@ class Orchestrator:
     
     def _validate_signal(self, signal: TradeSignal) -> Dict[str, Any]:
         """
-        Validate a trade signal using risk checks and critic analysis.
-        This is a placeholder for the Critic Agent's validation.
+        Validate a trade signal using the Critic Auditor (DeepSeek-R1 CoT risk auditor).
         
         Args:
             signal: TradeSignal to validate
@@ -366,54 +387,29 @@ class Orchestrator:
         Returns:
             Dictionary with validation results
         """
-        # For now, we'll do a simple risk check
-        # In a real implementation, this would involve the Critic Agent (LLM)
-        
-        # Check cash reserve
-        account_info = self.broker.get_account_info()
-        available_cash = account_info['available_for_trading']
-        
-        # Estimate cost of the trade
         market_data = self.broker.get_market_data(signal.ticker, self.timeframe, limit=1)
         if not market_data:
             return {
                 'approved': False,
                 'reason': f"Unable to get market data for {signal.ticker}",
-                'violations': ['market_data_unavailable']
+                'violations': ['market_data_unavailable'],
+                'adjusted_quantity': 0
             }
         
-        current_price = market_data[-1]['close']
-        estimated_cost = signal.quantity * current_price
+        current_price = float(market_data[-1]['close'])
         
-        # Check if we have enough cash (respecting reserve)
-        if estimated_cost > available_cash:
+        try:
+            # Audit via Critic Agent (DeepSeek-R1 + Persona + ChromaDB memory)
+            audit_result = self.critic_agent.audit_proposed_signal(signal, current_price)
+            return audit_result
+        except Exception as e:
+            logger.error(f"Critic agent validation failed: {e}", exc_info=True)
             return {
                 'approved': False,
-                'reason': f"Insufficient cash: need ${estimated_cost:.2f}, have ${available_cash:.2f} available",
-                'violations': ['cash_reserve'],
-                'adjusted_quantity': int(available_cash / current_price) if current_price > 0 else 0
+                'reason': f"Risk audit error: {str(e)}",
+                'violations': ['audit_exception'],
+                'adjusted_quantity': 0
             }
-        
-        # Check position size limit
-        position_value = estimated_cost
-        total_equity = account_info['total_equity']
-        position_pct = position_value / total_equity if total_equity > 0 else 0
-        
-        if position_pct > self.max_position_size:
-            return {
-                'approved': False,
-                'reason': f"Position size too large: {position_pct:.2%} > {self.max_position_size:.2%}",
-                'violations': ['position_size'],
-                'adjusted_quantity': int((total_equity * self.max_position_size) / current_price) if current_price > 0 else 0
-            }
-        
-        # If we pass all checks, approve the signal
-        return {
-            'approved': True,
-            'reason': "Signal passed all risk checks",
-            'violations': [],
-            'adjusted_quantity': signal.quantity  # No adjustment needed
-        }
     
     def _signal_to_order(self, signal: TradeSignal, validation_result: Dict[str, Any]) -> OrderContract:
         """

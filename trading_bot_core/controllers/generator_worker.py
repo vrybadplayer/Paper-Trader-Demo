@@ -13,9 +13,12 @@ import logging
 from ..models.schemas import TradeSignal, PortfolioState
 from ..models.order_contracts import OrderContract, OrderAction, OrderType
 from ..broker_gateway.sandbox_broker import SandboxBroker
+from ..broker_gateway.alpaca_broker import AlpacaBroker
+from ..broker_gateway.bursa_malaysia_broker import BursaMalaysiaBroker
 from ..models.portfolio_state import PortfolioManager
 from ..database.vector_store import VectorStore
 from ..self_healing.traceback_sanitizer import safe_execute
+from .llm_client import OllamaClient
 
 logger = logging.getLogger(__name__)
 
@@ -23,7 +26,7 @@ class GeneratorWorker:
     """
     Worker Agent (System 1) - Optimized for procedural execution and fast tool calling.
     Handles market data fetching, technical indicator calculation, and order execution preparation.
-    Operates with low temperature (0.0) for deterministic outputs.
+    Powered by qwen2.5-coder:7b via local Ollama endpoint with fallback heuristics.
     """
     
     def __init__(self, config: Dict[str, Any]):
@@ -34,16 +37,31 @@ class GeneratorWorker:
             config: Configuration dictionary
         """
         self.config = config
-        self.broker = SandboxBroker(config.get('broker', {}))
-        self.position_tracker = PortfolioManager(initial_cash=config.get('broker', {}).get('initial_balance', 50000.0))
+        broker_cfg = config.get('broker', {})
+        b_type = str(broker_cfg.get('type', 'bursa')).lower()
+        if b_type in ['bursa', 'moomoo', 'klse', 'myx', 'malaysia'] or config.get('tickers', ['1155.KL'])[0].endswith('.KL'):
+            self.broker = BursaMalaysiaBroker(broker_cfg)
+        elif b_type == 'alpaca' or broker_cfg.get('live_enabled') or bool(config.get('alpaca_api_key')):
+            self.broker = AlpacaBroker(broker_cfg)
+        else:
+            self.broker = SandboxBroker(broker_cfg)
+        self.min_cash_reserve = config.get('system', {}).get('cash_reserve', config.get('min_cash_reserve', 50000.0))
+        self.position_tracker = PortfolioManager(initial_cash=init_cash, reserve_limit=self.min_cash_reserve)
         self.vector_store = VectorStore()
+        
+        # LLM integration
+        ollama_url = config.get('model_routing', {}).get('ollama_base_url', 'http://localhost:11434') if isinstance(config.get('model_routing'), dict) else 'http://localhost:11434'
+        self.llm_client = OllamaClient(base_url=ollama_url)
+        self.worker_model = "qwen2.5-coder:7b"
+        if isinstance(config.get('model_routing'), dict) and 'worker_engine' in config['model_routing']:
+            self.worker_model = config['model_routing']['worker_engine'].get('primary', 'qwen2.5-coder:7b')
         
         # Worker-specific parameters
         self.tickers = config.get('tickers', ['AAPL', 'GOOGL', 'MSFT', 'TSLA'])
         self.timeframe = config.get('timeframe', '1D')
         self.lookback_period = config.get('lookback_period', 20)
         
-        logger.info("Generator Worker initialized")
+        logger.info(f"Generator Worker initialized (Model: {self.worker_model}, Ollama: {ollama_url})")
     
     def fetch_market_data(self, ticker: str, timeframe: str = None, limit: int = 100) -> Dict[str, Any]:
         """
@@ -340,8 +358,8 @@ class GeneratorWorker:
     
     def generate_signal(self, ticker: str) -> Optional[TradeSignal]:
         """
-        Generate a trade signal based on technical analysis.
-        This is the core signal generation logic for the Worker Agent.
+        Generate a trade signal using the Researcher Persona (Quinn) powered by Ollama (qwen2.5-coder:7b),
+        with deterministic quantitative fallback.
         
         Args:
             ticker: Stock ticker symbol to analyze
@@ -350,61 +368,148 @@ class GeneratorWorker:
             TradeSignal if a signal is generated, None otherwise
         """
         try:
-            # Fetch market data
+            # 1. Fetch market data
             market_data_result = self.fetch_market_data(ticker, limit=50)
             if market_data_result.get("status") != "success":
                 logger.warning(f"Could not fetch market data for {ticker}")
                 return None
             
             market_data = market_data_result["data"]
-            if len(market_data) < 20:  # Need enough data for indicators
+            if len(market_data) < 20:
                 logger.warning(f"Insufficient market data for {ticker}")
                 return None
             
-            # Calculate some technical indicators
+            # 2. Calculate indicators
             rsi_result = self.calculate_technical_indicator(ticker, "RSI", period=14)
             macd_result = self.calculate_technical_indicator(ticker, "MACD")
+            bbands_result = self.calculate_technical_indicator(ticker, "BBANDS")
             
-            # Simple signal generation logic (placeholder for more sophisticated logic)
-            current_price = market_data[-1]["close"]
+            current_price = float(market_data[-1]["close"])
+            high_price = float(market_data[-1].get("high", current_price))
+            low_price = float(market_data[-1].get("low", current_price))
+            volume = float(market_data[-1].get("volume", 0))
             
-            # Get RSI value (if available)
-            rsi_value = 50.0  # Default neutral
+            rsi_value = 50.0
             if rsi_result.get("status") == "success" and rsi_result.get("values"):
-                rsi_value = rsi_result["values"][-1]["value"]
+                rsi_value = float(rsi_result["values"][-1]["value"])
             
-            # Generate signal based on RSI (simplified)
+            macd_value = 0.0
+            macd_signal = 0.0
+            if macd_result.get("status") == "success" and macd_result.get("values"):
+                macd_value = float(macd_result["values"][-1].get("macd", 0.0))
+                macd_signal = float(macd_result["values"][-1].get("signal", 0.0))
+
+            portfolio_state = self.position_tracker.get_state()
+            current_qty = self.position_tracker.get_position_quantity(ticker)
+            available_cash = portfolio_state.cash_balance - portfolio_state.reserve_limit
+            
+            # 3. LLM Strategy: Load Persona and Tool Manifest
+            persona_prompt = self.llm_client.load_persona("finance-investment-researcher.md")
+            tools_manifest = self.llm_client.load_manifest("worker_tools_manifest.md")
+            
+            system_message = (
+                f"{persona_prompt}\n\n"
+                f"### AVAILABLE SYSTEM TOOLS:\n{tools_manifest}\n\n"
+                "You must respond ONLY with a valid JSON object matching this schema:\n"
+                "{\n"
+                '  "action": "BUY" | "SELL" | "HOLD",\n'
+                '  "confidence": 0.0 to 1.0,\n'
+                '  "target_price": number,\n'
+                '  "stop_loss": number,\n'
+                '  "take_profit": number,\n'
+                '  "suggested_quantity": integer,\n'
+                '  "thesis": "detailed investment thesis and indicator analysis"\n'
+                "}"
+            )
+            
+            user_message = (
+                f"Analyze trading opportunity for ticker {ticker}:\n"
+                f"- Current Price: ${current_price:.2f} (High: ${high_price:.2f}, Low: ${low_price:.2f}, Volume: {volume:,.0f})\n"
+                f"- RSI(14): {rsi_value:.2f}\n"
+                f"- MACD: {macd_value:.4f}, Signal: {macd_signal:.4f}\n"
+                f"- Portfolio Cash Available: ${max(0, available_cash):.2f}\n"
+                f"- Current Owned Position: {current_qty} shares\n"
+                f"- Equity Reserve Floor: ${portfolio_state.reserve_limit:,.2f}\n\n"
+                "Evaluate whether a BUY, SELL, or HOLD signal should be issued based on market conditions, risk-reward (>= 1:2), and technical setups."
+            )
+            
+            # Try Ollama LLM call
+            llm_response = self.llm_client.chat(
+                model=self.worker_model,
+                messages=[
+                    {"role": "system", "content": system_message},
+                    {"role": "user", "content": user_message}
+                ],
+                temperature=0.0,
+                format_json=True
+            )
+            
+            if llm_response.get("status") == "success" and llm_response.get("json_data"):
+                data = llm_response["json_data"]
+                action_str = str(data.get("action", "HOLD")).upper().strip()
+                
+                if action_str in ["BUY", "SELL"]:
+                    action = OrderAction.BUY if action_str == "BUY" else OrderAction.SELL
+                    raw_qty = int(data.get("suggested_quantity", 100))
+                    qty = max(1, min(raw_qty, 500))
+                    
+                    target_p = float(data.get("target_price", current_price))
+                    stop_l = float(data.get("stop_loss", current_price * 0.95 if action == OrderAction.BUY else current_price * 1.05))
+                    take_p = float(data.get("take_profit", current_price * 1.10 if action == OrderAction.BUY else current_price * 0.90))
+                    conf = float(data.get("confidence", 0.75))
+                    thesis = data.get("thesis", f"Researcher {action_str} thesis on {ticker}")
+                    
+                    logger.info(f"[Researcher LLM - {self.worker_model}] Signal: {action_str} {qty} {ticker} @ ${current_price:.2f} (Conf: {conf:.2f})")
+                    
+                    return TradeSignal(
+                        ticker=ticker,
+                        action=action,
+                        quantity=qty,
+                        target_price=target_p,
+                        stop_loss=stop_l,
+                        take_profit=take_p,
+                        confidence=conf,
+                        timestamp=datetime.utcnow(),
+                        source=f"worker_llm_{self.worker_model}",
+                        rationale=thesis
+                    )
+                elif action_str == "HOLD":
+                    logger.debug(f"[Researcher LLM] HOLD recommendation for {ticker}: {data.get('thesis', 'No high-probability setup')}")
+                    return None
+            
+            # 4. Fallback Heuristic Rule (when LLM is offline or no JSON response)
+            logger.debug(f"Using quantitative fallback signal generator for {ticker}")
             signal = None
-            if rsi_value < 30:  # Oversold - potential buy signal
+            if rsi_value < 30 and available_cash > (current_price * 10):
                 signal = TradeSignal(
                     ticker=ticker,
                     action=OrderAction.BUY,
-                    quantity=100,  # Will be adjusted by risk checks
+                    quantity=100,
                     target_price=current_price * 1.02,
                     stop_loss=current_price * 0.95,
-                    take_profit=current_price * 1.1,
+                    take_profit=current_price * 1.10,
                     confidence=0.7,
                     timestamp=datetime.utcnow(),
-                    source="worker_technical",
-                    rationale=f"RSI oversold ({rsi_value:.1f}) - potential buy signal"
+                    source="worker_technical_fallback",
+                    rationale=f"RSI oversold ({rsi_value:.1f}) with MACD ({macd_value:.3f}) - potential mean reversion"
                 )
-            elif rsi_value > 70:  # Overbought - potential sell signal
+            elif rsi_value > 70 and current_qty > 0:
                 signal = TradeSignal(
                     ticker=ticker,
                     action=OrderAction.SELL,
-                    quantity=100,  # Will be adjusted by risk checks
+                    quantity=min(100, current_qty),
                     target_price=current_price * 0.98,
                     stop_loss=current_price * 1.05,
-                    take_profit=current_price * 0.9,
+                    take_profit=current_price * 0.90,
                     confidence=0.7,
                     timestamp=datetime.utcnow(),
-                    source="worker_technical",
-                    rationale=f"RSI overbought ({rsi_value:.1f}) - potential sell signal"
+                    source="worker_technical_fallback",
+                    rationale=f"RSI overbought ({rsi_value:.1f}) - profit taking"
                 )
             
             return signal
         except Exception as e:
-            logger.error(f"Error generating signal for {ticker}: {e}")
+            logger.error(f"Error generating signal for {ticker}: {e}", exc_info=True)
             return None
 
 # Example usage (for testing)

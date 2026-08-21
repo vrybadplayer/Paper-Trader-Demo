@@ -38,7 +38,7 @@ class SandboxBroker(BaseBroker):
         super().__init__(config)
         
         # Configuration
-        self.initial_balance = config.get('initial_balance', 50000.0)
+        self.initial_balance = config.get('sandbox_initial_balance') or config.get('initial_balance', 50000.0)
         self.commission_per_trade = config.get('commission_per_trade', 0.001)
         self.slippage_model = config.get('slippage_model', 'fixed')
         self.enable_latency_simulation = config.get('enable_latency_simulation', False)
