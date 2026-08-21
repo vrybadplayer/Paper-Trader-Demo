@@ -34,7 +34,7 @@ class OrderContract(BaseModel):
     
     # Risk and compliance
     trigger_signal_id: Optional[str] = Field(None, description="Reference to originating signal")
-    critic_approval_id: Optional[str] = Field(None, Description="Reference to critic's approval record")
+    critic_approval_id: Optional[str] = Field(None, description="Reference to critic's approval record")
     pre_trade_risk_check_id: Optional[str] = Field(None, description="Reference to pre-trade risk check")
     
     # Costs
@@ -51,7 +51,7 @@ class OrderContract(BaseModel):
         json_encoders = {
             datetime: lambda v: v.isoformat() + 'Z' if v.tzinfo is None else v.isoformat()
         }
-        schema_extra = {
+        json_schema_extra = {
             "example": {
                 "order_id": "ord_1234567890abcdef",
                 "client_order_id": "cli_9876543210fedcba",

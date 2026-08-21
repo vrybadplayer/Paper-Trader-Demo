@@ -6,12 +6,12 @@ Paper-trading sandbox that simulates order execution without real market risk.
 import logging
 import threading
 import time
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any
 from datetime import datetime
 from .base_broker import BaseBroker
 from ..models.order_contracts import OrderContract, OrderAction, OrderType, OrderStatus
 from ..models.schemas import PortfolioState
-from ..database.position_tracker import PositionTracker
+from ..models.portfolio_state import PortfolioManager
 from ..database.transaction_ledger import TransactionLedger
 from ..database.vector_store import VectorStore
 
@@ -45,7 +45,7 @@ class SandboxBroker(BaseBroker):
         self.latency_range_ms = config.get('latency_range_ms', [10, 100])
         
         # Internal state management
-        self.position_tracker = PositionTracker()
+        self.position_tracker = PortfolioManager(initial_cash=self.initial_balance)
         self.transaction_ledger = TransactionLedger()
         self.vector_store = VectorStore()
         

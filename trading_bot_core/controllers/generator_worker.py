@@ -13,7 +13,7 @@ import logging
 from ..models.schemas import TradeSignal, PortfolioState
 from ..models.order_contracts import OrderContract, OrderAction, OrderType
 from ..broker_gateway.sandbox_broker import SandboxBroker
-from ..database.position_tracker import PositionTracker
+from ..models.portfolio_state import PortfolioManager
 from ..database.vector_store import VectorStore
 from ..self_healing.traceback_sanitizer import safe_execute
 
@@ -35,7 +35,7 @@ class GeneratorWorker:
         """
         self.config = config
         self.broker = SandboxBroker(config.get('broker', {}))
-        self.position_tracker = PositionTracker()
+        self.position_tracker = PortfolioManager(initial_cash=config.get('broker', {}).get('initial_balance', 50000.0))
         self.vector_store = VectorStore()
         
         # Worker-specific parameters

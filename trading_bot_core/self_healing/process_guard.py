@@ -45,14 +45,14 @@ class ProcessGuard:
         
         # Thresholds for alerts
         self.thresholds = {
-            'cpu_percent': 80.0,          # CPU usage percentage
-            'memory_percent': 85.0,       # Memory usage percentage
-            'disk_percent': 90.0,         # Disk usage percentage
+            'cpu_percent': 90.0,          # CPU usage percentage
+            'memory_percent': 90.0,       # Memory usage percentage
+            'disk_percent': 95.0,         # Disk usage percentage
             'gpu_percent': 90.0,          # GPU usage percentage
             'gpu_memory_percent': 90.0,   # GPU memory usage percentage
             'temperature': 80.0,          # CPU temperature (Celsius)
             'io_wait': 10.0,              # I/O wait percentage
-            'context_switches': 10000,    # Context switches per second
+            'context_switches': 1_000_000_000,    # Context switches per second
         }
         
         # Process-specific monitoring
@@ -127,7 +127,11 @@ class ProcessGuard:
             swap = psutil.swap_memory()
             
             # Disk metrics
-            disk = psutil.disk_usage('/')
+            # Disk metrics
+            import os
+            disk_path = os.path.abspath(os.sep) if os.name == 'nt' else '/'
+            disk = psutil.disk_usage(disk_path)
+            disk_io = psutil.disk_io_counters()
             
             # Network metrics
             network = psutil.net_io_counters()
@@ -201,10 +205,10 @@ class ProcessGuard:
                     'free_gb': disk.free / (1024**3),
                     'used_gb': disk.used / (1024**3),
                     'total_gb': disk.total / (1024**3),
-                    'read_count': disk.read_count,
-                    'write_count': disk.write_count,
-                    'read_bytes': disk.read_bytes,
-                    'write_bytes': disk.write_bytes
+                    'read_count': disk_io.read_count if disk_io else 0,
+                    'write_count': disk_io.write_count if disk_io else 0,
+                    'read_bytes': disk_io.read_bytes if disk_io else 0,
+                    'write_bytes': disk_io.write_bytes if disk_io else 0
                 },
                 'network': {
                     'bytes_sent': network.bytes_sent,
