@@ -5,7 +5,7 @@ import json
 import os
 from typing import Dict, List, Optional
 from threading import Lock
-from ..models.schemas import PortfolioPosition
+from trading_bot_core.models.schemas import PortfolioPosition
 
 class PositionTracker:
     """

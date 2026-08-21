@@ -39,6 +39,21 @@ class OllamaClient:
         except Exception:
             return False
 
+    def get_available_models(self) -> List[str]:
+        """Get list of available models from the Ollama server."""
+        try:
+            req = urllib.request.Request(
+                f"{self.base_url}/api/tags",
+                headers={"User-Agent": "PaperTraderBot"}
+            )
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+                models = data.get("models", [])
+                return [m.get("name") for m in models if m.get("name")]
+        except Exception as e:
+            logger.warning(f"Failed to get available models from Ollama: {e}")
+            return []
+
     def load_persona(self, filename: str) -> str:
         """Load persona markdown file from trading_bot_core/personas/."""
         if filename in self._persona_cache:

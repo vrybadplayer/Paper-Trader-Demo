@@ -10,16 +10,16 @@ from typing import Dict, List, Optional, Any
 from datetime import datetime
 import logging
 
-from ..models.schemas import TradeSignal, PortfolioState, RiskCheckResult
-from ..models.order_contracts import OrderContract
-from ..broker_gateway.sandbox_broker import SandboxBroker
-from ..broker_gateway.alpaca_broker import AlpacaBroker
-from ..broker_gateway.bursa_malaysia_broker import BursaMalaysiaBroker
-from ..models.portfolio_state import PortfolioManager
-from ..database.transaction_ledger import TransactionLedger
-from ..database.vector_store import VectorStore
-from ..self_healing.traceback_sanitizer import safe_execute
-from .llm_client import OllamaClient
+from trading_bot_core.models.schemas import TradeSignal, PortfolioState, RiskCheckResult
+from trading_bot_core.models.order_contracts import OrderContract
+from trading_bot_core.broker_gateway.sandbox_broker import SandboxBroker
+from trading_bot_core.broker_gateway.alpaca_broker import AlpacaBroker
+from trading_bot_core.broker_gateway.bursa_malaysia_broker import BursaMalaysiaBroker
+from trading_bot_core.models.portfolio_state import PortfolioManager
+from trading_bot_core.database.transaction_ledger import TransactionLedger
+from trading_bot_core.database.vector_store import VectorStore
+from trading_bot_core.self_healing.traceback_sanitizer import safe_execute
+from trading_bot_core.controllers.llm_client import OllamaClient
 
 logger = logging.getLogger(__name__)
 

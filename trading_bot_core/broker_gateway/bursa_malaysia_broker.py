@@ -29,7 +29,7 @@ from datetime import datetime, timedelta
 from collections import deque
 
 from .base_broker import BaseBroker
-from ..models.order_contracts import OrderContract, OrderAction, OrderType, OrderStatus
+from trading_bot_core.models.order_contracts import OrderContract, OrderAction, OrderType, OrderStatus
 
 logger = logging.getLogger(__name__)
 

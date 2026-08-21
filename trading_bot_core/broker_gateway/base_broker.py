@@ -6,8 +6,8 @@ Abstract base class defining the interface for all broker implementations.
 import abc
 from typing import Dict, List, Optional, Any
 from datetime import datetime
-from ..models.order_contracts import OrderContract, OrderAction, OrderType, OrderStatus
-from ..models.schemas import PortfolioState
+from trading_bot_core.models.order_contracts import OrderContract, OrderAction, OrderType, OrderStatus
+from trading_bot_core.models.schemas import PortfolioState
 
 class BaseBroker(abc.ABC):
     """

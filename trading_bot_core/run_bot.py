@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+import os
+import sys
+# Add the parent directory of this script to the sys.path so we can import trading_bot_core
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 """
 Autonomous Dual-Agent Trading Bot - Bursa Malaysia (MYX / KLSE) Entrypoint
 ==========================================================================

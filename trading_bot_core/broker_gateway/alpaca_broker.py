@@ -14,7 +14,7 @@ from typing import Dict, List, Optional, Any, Tuple
 from datetime import datetime, timedelta, timezone
 
 from .base_broker import BaseBroker
-from ..models.order_contracts import OrderContract, OrderAction, OrderType, OrderStatus
+from trading_bot_core.models.order_contracts import OrderContract, OrderAction, OrderType, OrderStatus
 
 logger = logging.getLogger(__name__)
 

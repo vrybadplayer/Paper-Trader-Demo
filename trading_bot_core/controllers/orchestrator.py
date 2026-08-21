@@ -11,20 +11,20 @@ from datetime import datetime
 from enum import Enum
 import logging
 
-from ..models.schemas import PortfolioState, TradeSignal, RiskCheckResult
-from ..models.order_contracts import OrderContract, OrderAction, OrderType, OrderStatus
-from ..broker_gateway.sandbox_broker import SandboxBroker
-from ..broker_gateway.alpaca_broker import AlpacaBroker
-from ..broker_gateway.bursa_malaysia_broker import BursaMalaysiaBroker
-from ..database.position_tracker import PositionTracker
-from ..database.transaction_ledger import TransactionLedger
-from ..database.vector_store import VectorStore
-from ..self_healing.process_guard import ProcessGuard
-from ..self_healing.traceback_sanitizer import safe_execute, setup_traceback_excepthook
-from ..views.rich_dashboard import RichDashboard
-from ..models.portfolio_state import PortfolioManager
-from .generator_worker import GeneratorWorker
-from .critic_auditor import CriticAuditor
+from trading_bot_core.models.schemas import PortfolioState, TradeSignal, RiskCheckResult
+from trading_bot_core.models.order_contracts import OrderContract, OrderAction, OrderType, OrderStatus
+from trading_bot_core.broker_gateway.sandbox_broker import SandboxBroker
+from trading_bot_core.broker_gateway.alpaca_broker import AlpacaBroker
+from trading_bot_core.broker_gateway.bursa_malaysia_broker import BursaMalaysiaBroker
+from trading_bot_core.database.position_tracker import PositionTracker
+from trading_bot_core.database.transaction_ledger import TransactionLedger
+from trading_bot_core.database.vector_store import VectorStore
+from trading_bot_core.self_healing.process_guard import ProcessGuard
+from trading_bot_core.self_healing.traceback_sanitizer import safe_execute, setup_traceback_excepthook
+from trading_bot_core.views.rich_dashboard import RichDashboard
+from trading_bot_core.models.portfolio_state import PortfolioManager
+from trading_bot_core.controllers.generator_worker import GeneratorWorker
+from trading_bot_core.controllers.critic_auditor import CriticAuditor
 
 logger = logging.getLogger(__name__)
 
@@ -303,7 +303,33 @@ class Orchestrator:
                 if self.is_running:
                     self.state = OrchestratorState.IDLE
     
-    def _state_updating_state(self):
+    def run_fsm_cycle(self):
+        """Run one iteration of the FSM."""
+        try:
+            with self.state_lock:
+                if self.state == OrchestratorState.ERROR:
+                    # In error state, wait a bit before trying to recover
+                    time.sleep(5.0)
+                    return
+                # Proceed through the states
+                if self.state == OrchestratorState.IDLE:
+                    self._state_idle()
+                elif self.state == OrchestratorState.FETCHING_DATA:
+                    self._state_fetching_data()
+                elif self.state == OrchestratorState.GENERATING_SIGNAL:
+                    self._state_generating_signal()
+                elif self.state == OrchestratorState.VALIDATING_SIGNAL:
+                    self._state_validating_signal()
+                elif self.state == OrchestratorState.EXECUTING_TRADE:
+                    self._state_executing_trade()
+                elif self.state == OrchestratorState.UPDATING_STATE:
+                    self._state_updating_state()
+                elif self.state == OrchestratorState.STOPPED:
+                    return
+        except Exception as e:
+            logger.error(f"Error in FSM cycle: {e}", exc_info=True)
+            with self.state_lock:
+                self.state = OrchestratorState.ERROR
         """UPDATING_STATE state: update all systems with the executed trade."""
         logger.debug("Updating state with executed trade")
         
@@ -380,10 +406,12 @@ class Orchestrator:
     def _validate_signal(self, signal: TradeSignal) -> Dict[str, Any]:
         """
         Validate a trade signal using the Critic Auditor (DeepSeek-R1 CoT risk auditor).
-        
+        Additionally applies portfolio-level risk management: dynamic position sizing,
+        correlation limits, time-based exposure, and sector concentration.
+
         Args:
             signal: TradeSignal to validate
-            
+
         Returns:
             Dictionary with validation results
         """
@@ -395,13 +423,12 @@ class Orchestrator:
                 'violations': ['market_data_unavailable'],
                 'adjusted_quantity': 0
             }
-        
+
         current_price = float(market_data[-1]['close'])
-        
+
         try:
             # Audit via Critic Agent (DeepSeek-R1 + Persona + ChromaDB memory)
             audit_result = self.critic_agent.audit_proposed_signal(signal, current_price)
-            return audit_result
         except Exception as e:
             logger.error(f"Critic agent validation failed: {e}", exc_info=True)
             return {
@@ -410,6 +437,68 @@ class Orchestrator:
                 'violations': ['audit_exception'],
                 'adjusted_quantity': 0
             }
+
+        if not audit_result.get('approved', False):
+            return audit_result
+
+        # If approved by critic, apply portfolio-level risk limits
+        try:
+            # Get current portfolio state
+            portfolio_state = self.portfolio_manager.get_state()
+
+            # Calculate volatility regime
+            vol = self.portfolio_manager.calculate_portfolio_volatility()
+            if vol < 0.1:
+                vol_regime = "low"
+            elif vol < 0.3:
+                vol_regime = "normal"
+            else:
+                vol_regime = "high"
+
+            # Get dynamic position size fraction (0 to 1) based on signal confidence and volatility
+            dynamic_fraction = self.portfolio_manager.get_dynamic_position_size(
+                signal.confidence, vol_regime
+            )
+
+            # Calculate max quantity allowed by dynamic position sizing
+            max_dynamic_qty = (portfolio_state.cash_balance * dynamic_fraction) / current_price
+            max_dynamic_qty = int(max_dynamic_qty)  # whole shares
+
+            # Start with critic's adjusted quantity, but not more than dynamic max
+            base_qty = audit_result.get('adjusted_quantity', signal.quantity)
+            quantity = min(base_qty, max_dynamic_qty)
+
+            # Check correlation risk
+            if not self.portfolio_manager.check_correlation_risk(signal.ticker):
+                quantity = 0
+            # Check time-based exposure
+            if not self.portfolio_manager.check_time_based_exposure():
+                quantity = 0
+            # Check sector concentration
+            if not self.portfolio_manager.check_sector_concentration(signal.ticker):
+                quantity = 0
+
+            # If quantity is zero or negative, reject
+            if quantity <= 0:
+                return {
+                    'approved': False,
+                    'reason': 'Risk limits exceeded (position size, correlation, time, or sector)',
+                    'violations': audit_result.get('violations', []) + ['risk_limits_exceeded'],
+                    'adjusted_quantity': 0
+                }
+
+            # Otherwise, return approved with adjusted quantity
+            return {
+                'approved': True,
+                'reason': 'Approved by risk management',
+                'violations': audit_result.get('violations', []),
+                'adjusted_quantity': quantity
+            }
+
+        except Exception as e:
+            logger.error(f"Error in portfolio risk management: {e}", exc_info=True)
+            # In case of error, we fall back to the critic's decision
+            return audit_result
     
     def _signal_to_order(self, signal: TradeSignal, validation_result: Dict[str, Any]) -> OrderContract:
         """

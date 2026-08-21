@@ -10,15 +10,15 @@ from typing import Dict, List, Optional, Any
 from datetime import datetime
 import logging
 
-from ..models.schemas import TradeSignal, PortfolioState
-from ..models.order_contracts import OrderContract, OrderAction, OrderType
-from ..broker_gateway.sandbox_broker import SandboxBroker
-from ..broker_gateway.alpaca_broker import AlpacaBroker
-from ..broker_gateway.bursa_malaysia_broker import BursaMalaysiaBroker
-from ..models.portfolio_state import PortfolioManager
-from ..database.vector_store import VectorStore
-from ..self_healing.traceback_sanitizer import safe_execute
-from .llm_client import OllamaClient
+from trading_bot_core.models.schemas import TradeSignal, PortfolioState
+from trading_bot_core.models.order_contracts import OrderContract, OrderAction, OrderType
+from trading_bot_core.broker_gateway.sandbox_broker import SandboxBroker
+from trading_bot_core.broker_gateway.alpaca_broker import AlpacaBroker
+from trading_bot_core.broker_gateway.bursa_malaysia_broker import BursaMalaysiaBroker
+from trading_bot_core.models.portfolio_state import PortfolioManager
+from trading_bot_core.database.vector_store import VectorStore
+from trading_bot_core.self_healing.traceback_sanitizer import safe_execute
+from trading_bot_core.controllers.llm_client import OllamaClient
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +38,7 @@ class GeneratorWorker:
         """
         self.config = config
         broker_cfg = config.get('broker', {})
+        init_cash = broker_cfg.get('sandbox_initial_balance') or broker_cfg.get('initial_balance') or config.get('initial_cash', 100000.0)
         b_type = str(broker_cfg.get('type', 'bursa')).lower()
         if b_type in ['bursa', 'moomoo', 'klse', 'myx', 'malaysia'] or config.get('tickers', ['1155.KL'])[0].endswith('.KL'):
             self.broker = BursaMalaysiaBroker(broker_cfg)
