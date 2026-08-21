@@ -13,35 +13,31 @@ model_routing:
     temperature: 0.1
     mode: "System 2: Deep Chain-of-Thought (Risk Auditing & Market Psychology)"
 
-# Malaysian Stock Universe (Bursa Malaysia / KLSE)
+# Single Stock Universe (Alpaca / NVDA)
 tickers:
-  - "5238.KL"  # Capital A Bhd (AirAsia Group / AAGB)
-  - "0138.KL"  # MY E.G. Services Bhd (ZETRIX)
-  - "0459.KL"  # Supreme Consolidated Bhd (SUM)
-  - "4677.KL"  # YTL Corporation Bhd (YTL)
-  - "1155.KL"  # Malayan Banking Bhd (Maybank)
-  - "1023.KL"  # CIMB Group Holdings Bhd
+  - "NVDA"
 
-# System Constants (in Malaysian Ringgit MYR)
+# System Constants (in USD)
 system:
-  cash_reserve: 30000.0   # RM 30,000 Minimum cash reserve invariant
-  max_position_size: 0.15 # Maximum 15% of equity per position
-  risk_free_rate: 0.03    # 3.0% Malaysian OPR benchmark rate
+  cash_reserve: 5000.0    # $5,000 Minimum cash reserve invariant
+  max_position_size: 0.25 # Maximum 25% of equity per position
+  risk_free_rate: 0.05    # 5.0% US Fed benchmark rate
 
-# Broker Configuration (Bursa Malaysia / Moomoo Open API / IBKR MYX)
+# Broker Configuration (Alpaca Paper Trading API)
 broker:
-  type: "moomoo"                       # "moomoo" (FutuOpenD for Bursa Malaysia) or "ibkr"
-  provider: "moomoo"                   # Moomoo Malaysia (FutuOpenD)
-  currency: "MYR"
-  host: "127.0.0.1"                    # Local FutuOpenD Gateway Host
-  port: 11111                          # FutuOpenD Port (11111) or IBKR (7497)
-  sandbox_enabled: true
-  live_enabled: false                  # Set to true for live simulated paper order execution
+  type: "alpaca"                       # "alpaca"
+  provider: "alpaca"                   # Alpaca Markets Paper Trading
+  currency: "USD"
+  base_url: "https://paper-api.alpaca.markets"
+  data_url: "https://data.alpaca.markets"
+  data_feed: "iex"
+  sandbox_enabled: false
+  live_enabled: true                   # Active for Alpaca paper execution
   paper_trading: true
-  sandbox_initial_balance: 100000.0    # RM 100,000 initial paper capital
-  shark_block_threshold_myr: 200000.0  # Flag institutional block trades >= RM 200,000
-  shark_block_min_lots: 500            # Flag orders >= 500 lots (50,000 shares)
-  commission_per_trade: 0.0015         # 0.15% brokerage on Bursa Malaysia
+  sandbox_initial_balance: 100000.0    # $100,000 initial paper capital
+  shark_block_threshold_usd: 150000.0  # Flag institutional block trades >= $150,000
+  shark_block_min_shares: 1000         # Flag orders >= 1,000 shares
+  commission_per_trade: 0.0            # Zero commission on Alpaca
   slippage_model: "fixed"
 
 # ChromaDB Configuration

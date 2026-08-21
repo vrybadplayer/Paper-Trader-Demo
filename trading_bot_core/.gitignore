@@ -5,3 +5,4 @@
 /controllers/__pycache__
 /broker_gateway/__pycache__
 /config/.env
+/__pycache__/

@@ -5,17 +5,16 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 """
-Autonomous Dual-Agent Trading Bot - Bursa Malaysia (MYX / KLSE) Entrypoint
-==========================================================================
-Launches the dual-agent trading engine locally with Bursa Malaysia (MYX)
-market data, Moomoo Open API (FutuOpenD) & IBKR broker integration,
-DeepSeek-R1 CoT risk auditing, and Malaysian institutional shark tape scanning.
+Autonomous Dual-Agent Trading Bot - Alpaca NVDA Single-Stock Strategy Entrypoint
+================================================================================
+Launches the dual-agent trading engine targeting NVDA stocks using Alpaca
+Markets Paper Trading API (v2) and Market Data API (v2).
 
 Usage:
     python run_bot.py                 # Interactive runner
     python run_bot.py --auto          # Autonomous continuous loop
-    python run_bot.py --scan 1155.KL  # Live Bursa Institutional Shark Tape (Maybank)
-    python run_bot.py --test-auth     # Test Moomoo / Bursa Gateway & Ollama
+    python run_bot.py --scan NVDA     # Live Alpaca Institutional Tape for NVDA
+    python run_bot.py --test-auth     # Test Alpaca Broker & Ollama
 """
 
 import os
@@ -45,7 +44,6 @@ from rich import print as rprint
 # Local module imports
 from controllers.orchestrator import Orchestrator
 from controllers.llm_client import OllamaClient
-from broker_gateway.bursa_malaysia_broker import BursaMalaysiaBroker
 from broker_gateway.alpaca_broker import AlpacaBroker
 from broker_gateway.sandbox_broker import SandboxBroker
 
@@ -61,20 +59,26 @@ def load_config() -> Dict[str, Any]:
     with open(config_path, "r") as f:
         config = yaml.safe_load(f) or {}
 
-    # Inject Moomoo / Bursa environment variables
-    futu_host = os.getenv("FUTU_OPEND_HOST", "127.0.0.1")
-    futu_port = int(os.getenv("FUTU_OPEND_PORT", 11111))
     config.setdefault("broker", {})
-    config["broker"]["host"] = futu_host
-    config["broker"]["port"] = futu_port
-    config["broker"]["type"] = "moomoo"
-    config["broker"]["currency"] = "MYR"
+    config["broker"]["type"] = "alpaca"
+    config["broker"]["currency"] = "USD"
+
+    # Inject Alpaca keys from environment if available
+    api_key = os.getenv("ALPACA_API_KEY") or os.getenv("APCA_API_KEY_ID")
+    secret_key = os.getenv("ALPACA_SECRET_KEY") or os.getenv("APCA_API_SECRET_KEY")
+    if api_key:
+        config["broker"]["api_key"] = api_key
+    if secret_key:
+        config["broker"]["api_secret"] = secret_key
+
+    # Hard restrict universe to NVDA only
+    config["tickers"] = ["NVDA"]
 
     return config
 
 def check_system_health(config: Dict[str, Any]):
-    """Verify Ollama and Bursa Malaysia / Moomoo Gateway connections."""
-    console.print("\n[bold cyan]═══ Bursa Malaysia (MYX) System Pre-Flight Checks ═══[/bold cyan]")
+    """Verify Ollama and Alpaca Broker Gateway connections."""
+    console.print("\n[bold cyan]═══ Alpaca Market (NVDA) System Pre-Flight Checks ═══[/bold cyan]")
     
     # 1. Ollama Check
     ollama_url = config.get("model_routing", {}).get("ollama_base_url", "http://localhost:11434")
@@ -87,71 +91,71 @@ def check_system_health(config: Dict[str, Any]):
     else:
         console.print(f"[bold yellow]⚠ Ollama Offline[/bold yellow] ({ollama_url}) - Ensure 'ollama serve' is running. Fallback heuristic active.")
 
-    # 2. Bursa Malaysia Broker Gateway Check
+    # 2. Alpaca Broker Gateway Check
     broker_cfg = config.get("broker", {})
-    bursa = BursaMalaysiaBroker(broker_cfg)
-    bursa_ok = bursa.connect()
+    alpaca = AlpacaBroker(broker_cfg)
+    alpaca_ok = alpaca.connect()
     
-    if bursa_ok:
-        acc = bursa.get_account_info()
-        console.print(f"[bold green]✔ Bursa Malaysia Gateway Active[/bold green] ({acc.get('broker')})")
-        console.print(f"  • Account: [cyan]#{acc.get('account_number')}[/cyan] | Market: [bold green]{acc.get('market')}[/bold green]")
-        console.print(f"  • Cash Balance: [bold green]RM {acc.get('cash_balance', 0):,.2f}[/bold green] | Total Equity: [bold green]RM {acc.get('total_equity', 0):,.2f}[/bold green]")
-        console.print(f"  • Buying Power: [bold green]RM {acc.get('buying_power', 0):,.2f}[/bold green] | Currency: [yellow]MYR[/yellow]")
+    if alpaca_ok:
+        acc = alpaca.get_account_info()
+        console.print(f"[bold green]✔ Alpaca Broker Gateway Active[/bold green]")
+        console.print(f"  • Account: [cyan]#{acc.get('account_number')}[/cyan] | Paper Trading: [bold green]{acc.get('is_paper')}[/bold green]")
+        console.print(f"  • Cash Balance: [bold green]${acc.get('cash_balance', 0):,.2f}[/bold green] | Total Equity: [bold green]${acc.get('total_equity', 0):,.2f}[/bold green]")
+        console.print(f"  • Buying Power: [bold green]${acc.get('buying_power', 0):,.2f}[/bold green] | Currency: [yellow]USD[/yellow]")
     else:
-        console.print(f"[bold red]✘ Bursa Gateway Error[/bold red]: {bursa.get_last_error()}")
+        console.print(f"[bold red]✘ Alpaca Gateway Notice[/bold red]: {alpaca.get_last_error()}")
+        console.print("[dim]Set ALPACA_API_KEY and ALPACA_SECRET_KEY in environment or .env for live paper execution.[/dim]")
 
     console.print("[bold cyan]═════════════════════════════════════════════════════[/bold cyan]\n")
-    return ollama_ok, bursa_ok
+    return ollama_ok, alpaca_ok
 
 def run_shark_tape_scanner(ticker: str, config: Dict[str, Any]):
-    """Run real-time institutional shark tape scanner on a Bursa Malaysia stock."""
-    console.print(f"\n[bold magenta]🦈 Scanning Bursa Malaysia Institutional Tape for {ticker}...[/bold magenta]")
+    """Run real-time institutional shark tape scanner on NVDA via Alpaca."""
+    ticker = "NVDA"  # Force single stock NVDA
+    console.print(f"\n[bold magenta]🦈 Scanning Alpaca Institutional Tape for {ticker}...[/bold magenta]")
     broker_cfg = config.get("broker", {})
-    bursa = BursaMalaysiaBroker(broker_cfg)
+    alpaca = AlpacaBroker(broker_cfg)
     
-    scan = bursa.scan_shark_activity(ticker, lookback_minutes=30)
+    scan = alpaca.scan_shark_activity(ticker, lookback_minutes=30)
     
-    table = Table(title=f"Bursa Malaysia Institutional Order Flow: {scan.get('ticker')}")
+    table = Table(title=f"Alpaca Institutional Order Flow: {scan.get('ticker')}")
     table.add_column("Metric", style="cyan")
     table.add_column("Live Market Value", style="bold white")
     
-    table.add_row("Current Price", f"RM {scan.get('current_price_myr', 0):.2f}")
+    table.add_row("Current Price", f"${scan.get('current_price_usd', scan.get('current_price_myr', 0)):.2f}")
     table.add_row("Institutional Shark Detected", "[bold green]YES (Whale Inflow)[/bold green]" if scan.get('shark_detected') else "[dim]NO[/dim]")
     table.add_row("Capital Flow Signature", f"[bold yellow]{scan.get('type')}[/bold yellow]")
-    table.add_row("Cumulative Volume Delta (CVD)", f"{scan.get('delta_volume_shares', 0):+,d} shares ({scan.get('delta_volume_lots', 0):+,d} lots)")
+    table.add_row("Cumulative Volume Delta (CVD)", f"{scan.get('delta_volume_shares', 0):+,d} shares")
     table.add_row("Institutional Buyer Pressure", f"{scan.get('buy_pressure_ratio', 0.5) * 100:.1f}%")
-    table.add_row("Super-Large Inflow (Whale)", f"[bold green]RM {scan.get('super_large_inflow_myr', 0):,.2f}[/bold green]")
-    table.add_row("Super-Large Outflow (Whale)", f"[bold red]RM {scan.get('super_large_outflow_myr', 0):,.2f}[/bold red]")
+    table.add_row("Super-Large Inflow (Whale)", f"[bold green]${scan.get('super_large_inflow_usd', 0):,.2f}[/bold green]")
+    table.add_row("Super-Large Outflow (Whale)", f"[bold red]${scan.get('super_large_outflow_usd', 0):,.2f}[/bold red]")
     
     console.print(table)
     
     if scan.get('block_trades'):
-        b_table = Table(title=f"Recent Institutional Block Prints & Broker Queue ({scan.get('ticker')})")
+        b_table = Table(title=f"Recent Institutional Block Prints ({scan.get('ticker')})")
         b_table.add_column("Time", style="dim")
         b_table.add_column("Side", style="bold")
-        b_table.add_column("Broker / Institution", style="cyan")
-        b_table.add_column("Price (RM)", style="green")
-        b_table.add_column("Volume (Lots / Shares)", style="white")
-        b_table.add_column("Notional Value (RM)", style="bold yellow")
+        b_table.add_column("Price ($)", style="green")
+        b_table.add_column("Volume (Shares)", style="white")
+        b_table.add_column("Notional Value ($)", style="bold yellow")
         
         for b in scan['block_trades']:
             side_color = "[green]BUY[/green]" if b.get('side') == 'BUY' else "[red]SELL[/red]"
             b_table.add_row(
                 str(b.get('timestamp')),
                 side_color,
-                str(b.get('broker_queue')),
-                f"RM {b.get('price_myr'):.2f}",
-                f"{b.get('lots'):,} lots ({b.get('shares'):,} shs)",
-                f"RM {b.get('notional_myr', 0):,.2f}"
+                f"${b.get('price_usd', b.get('price', 0)):.2f}",
+                f"{b.get('shares', 0):,} shs",
+                f"${b.get('notional_usd', 0):,.2f}"
             )
         console.print(b_table)
 
 def main():
-    parser = argparse.ArgumentParser(description="Autonomous Dual-Agent Trading Bot - Bursa Malaysia")
+    parser = argparse.ArgumentParser(description="Autonomous Dual-Agent Trading Bot - Alpaca NVDA")
     parser.add_argument("--auto", action="store_true", help="Run in continuous autonomous loop")
-    parser.add_argument("--scan", type=str, default=None, help="Scan live Bursa Malaysia ticker (e.g. 5238.KL, 0138.KL, 0459.KL, 4677.KL)")
-    parser.add_argument("--test-auth", action="store_true", help="Test Moomoo / Bursa Gateway and Ollama connectivity")
+    parser.add_argument("--scan", type=str, default="NVDA", help="Scan live Alpaca NVDA ticker tape")
+    parser.add_argument("--test-auth", action="store_true", help="Test Alpaca Gateway and Ollama connectivity")
     parser.add_argument("--interval", type=int, default=10, help="Cycle interval in seconds for auto mode")
     args = parser.parse_args()
 
@@ -162,7 +166,7 @@ def main():
         return
 
     if args.scan:
-        run_shark_tape_scanner(args.scan.upper(), config)
+        run_shark_tape_scanner("NVDA", config)
         return
 
     check_system_health(config)
@@ -171,7 +175,7 @@ def main():
     orchestrator = Orchestrator(config)
 
     if args.auto:
-        console.print(f"[bold green]Starting Bursa Malaysia Autonomous Trading Loop (Interval: {args.interval}s)... Press Ctrl+C to stop.[/bold green]")
+        console.print(f"[bold green]Starting Alpaca NVDA Autonomous Trading Loop (Interval: {args.interval}s)... Press Ctrl+C to stop.[/bold green]")
         try:
             while True:
                 orchestrator.run_fsm_cycle()
@@ -181,28 +185,26 @@ def main():
             orchestrator.stop()
     else:
         console.print(Panel(
-            "[bold white]Autonomous Dual-Agent Trading Bot - Bursa Malaysia (MYX / KLSE)[/bold white]\n"
-            "• System 1: Researcher / Generator (Fast Alpha & Malaysian Stock Tape Calling)\n"
-            "• System 2: Critic Auditor (DeepSeek-R1 CoT Risk & ChromaDB Loss Memories)\n"
-            "• Broker Gateway: Moomoo Malaysia (FutuOpenD) / IBKR MYX in Malaysian Ringgit (MYR)",
-            title="Bursa Bot Online", border_style="cyan"
+            "[bold white]Autonomous Dual-Agent Trading Bot - Alpaca NVDA Single Stock Strategy[/bold white]\n"
+            "• System 1: Researcher / Generator (Fast Alpha & NVDA Order Flow Scanning)\n"
+            "• System 2: Critic Auditor (DeepSeek-R1 CoT Risk & Portfolio Memory)\n"
+            "• Broker Gateway: Alpaca Markets Paper Trading in USD",
+            title="NVDA Trading Engine Online", border_style="cyan"
         ))
         
         while True:
             try:
-                cmd = console.input("\n[bold cyan]Command ([r]un cycle, [s]can ticker, [p]ortfolio, [q]uit): [/bold cyan]").strip().lower()
+                cmd = console.input("\n[bold cyan]Command ([r]un cycle, [s]can NVDA, [p]ortfolio, [q]uit): [/bold cyan]").strip().lower()
                 if cmd in ['q', 'exit', 'quit']:
                     break
                 elif cmd in ['r', 'run', 'c', 'cycle']:
                     orchestrator.run_fsm_cycle()
                 elif cmd.startswith('s ') or cmd == 's':
-                    parts = cmd.split()
-                    ticker = parts[1].upper() if len(parts) > 1 else console.input("Enter Bursa ticker (e.g. 5238.KL AAGB, 0138.KL ZETRIX, 0459.KL SUM, 4677.KL YTL): ").strip().upper()
-                    run_shark_tape_scanner(ticker, config)
+                    run_shark_tape_scanner("NVDA", config)
                 elif cmd in ['p', 'portfolio']:
                     pos = orchestrator.broker.get_positions()
                     acc = orchestrator.broker.get_account_info()
-                    console.print(f"Cash: RM {acc.get('cash_balance', 0):,.2f} | Total Equity: RM {acc.get('total_equity', 0):,.2f} | Open Positions: {len(pos)}")
+                    console.print(f"Cash: ${acc.get('cash_balance', 0):,.2f} | Total Equity: ${acc.get('total_equity', 0):,.2f} | Open Positions: {len(pos)}")
                 else:
                     console.print("[dim]Unknown command. Choose 'run', 'scan', 'portfolio', or 'quit'.[/dim]")
             except KeyboardInterrupt:
@@ -210,4 +212,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
